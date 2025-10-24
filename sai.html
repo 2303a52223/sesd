@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Movie Ticket Booking System — OOP + Unit Testing (Lab)</title>
+  <style>
+    :root{--accent:#b0232b;--muted:#6b7280;--card:#ffffff}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f7f7fb;color:#0f1724;margin:0}
+    header{background:linear-gradient(90deg,var(--accent),#e85a63);color:white;padding:22px}
+    .container{max-width:1000px;margin:20px auto;padding:0 18px}
+    h1{margin:0;font-size:20px}
+    .meta{margin-top:6px;font-size:13px;color:rgba(255,255,255,0.95)}
+    main{display:grid;grid-template-columns:1fr 320px;gap:20px;margin-top:18px}
+    .card{background:var(--card);border-radius:10px;padding:18px;box-shadow:0 6px 18px rgba(16,24,40,0.06)}
+    pre{background:#0b1320;color:#e6eef8;padding:12px;border-radius:8px;overflow:auto;font-size:13px}
+    .small{font-size:13px;color:var(--muted)}
+    .pill{display:inline-block;padding:6px 8px;border-radius:999px;background:#f3f4f6;font-weight:600;font-size:12px;margin-left:8px}
+    .code-block{border-left:3px solid var(--accent);padding-left:12px}
+    footer{margin:24px 0 60px;color:var(--muted);font-size:13px;text-align:center}
+    @media (max-width:980px){main{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <h1>Movie Ticket Booking System</h1>
+      <div class="meta">Design + Python OOP sample + Unit test templates for the lab assignment <span class="pill">Friday</span></div>
+    </div>
+  </header>
+
+  <div class="container">
+    <main>
+      <div class="card">
+        <h2>Overview</h2>
+        <p class="small">This document contains a concise OOP design for an online movie ticket booking module, a runnable Python example (classes + business logic), and unit test templates (pytest/unittest) that validate: seat availability updates, prevention of double booking, and cancellation + refund restoring availability.</p>
+
+        <hr />
+
+        <h3>Core classes &amp; responsibilities</h3>
+        <ul>
+          <li><strong>Movie</strong>: title, duration, rating, list of showtimes.</li>
+          <li><strong>Theater</strong>: name, screens. Each <em>Screen</em> has seating layout.</li>
+          <li><strong>Show</strong> (aka Showtime): movie, screen, start_time, seat_map (Seat objects / statuses).</li>
+          <li><strong>Seat</strong>: row, number, price, status (available/booked/held).</li>
+          <li><strong>Ticket</strong>: show_id, seat_id, price, booking_id, status.</li>
+          <li><strong>Booking</strong>: user, tickets, total_amount, payment_status. Methods: book_seat(), cancel_booking().</li>
+        </ul>
+
+        <h3>Business rules</h3>
+        <ul>
+          <li>Seat state transitions: AVAILABLE → HELD (optional) → BOOKED → CANCELLED → AVAILABLE.</li>
+          <li>Double booking prevention: booking operation must atomically check-and-set seat status.</li>
+          <li>Cancellation: refunds are simulated (payment_status -> refunded) and seats are set back to AVAILABLE.</li>
+          <li>Concurrency note: this simple example uses in-memory locks (threading.Lock) for atomicity — real systems require DB transactions or distributed locks.</li>
+        </ul>
+
+        <h3>Python implementation (compact)</h3>
+        <div class="code-block">
+<pre># movie_booking.py (compact demo)
+import threading
+from typing import Dict, List
+
+class Seat:
+    def __init__(self, row: str, num: int, price: float):
+        self.id = f"{row}{num}"
+        self.row = row
+        self.num = num
+        self.price = price
+        self.lock = threading.Lock()
+        self.booked = False
+
+    def book(self):
+        with self.lock:
+            if self.booked:
+                return False
+            self.booked = True
+            return True
+
+    def cancel(self):
+        with self.lock:
+            if not self.booked:
+                return False
+            self.booked = False
+            return True
+
+class Show:
+    def __init__(self, show_id: str, seats: List[Seat]):
+        self.show_id = show_id
+        self.seats: Dict[str, Seat] = {s.id: s for s in seats}
+
+    def is_seat_available(self, seat_id: str) -> bool:
+        seat = self.seats.get(seat_id)
+        return seat is not None and not seat.booked
+
+    def book_seat(self, seat_id: str) -> bool:
+        seat = self.seats.get(seat_id)
+        if seat is None:
+            return False
+        return seat.book()
+
+    def cancel_seat(self, seat_id: str) -> bool:
+        seat = self.seats.get(seat_id)
+        if seat is None:
+            return False
+        return seat.cancel()
+
+class BookingManager:
+    def __init__(self):
+        self.bookings = {}
+        self._id_counter = 1
+        self._lock = threading.Lock()
+
+    def create_booking(self, show: Show, seat_ids: List[str], user: str):
+        # try to book all seats atomically (best-effort): if any seat fails, rollback
+        locked = []
+        success = []
+        for sid in seat_ids:
+            seat = show.seats.get(sid)
+            if not seat:
+                # rollback
+                for s in success:
+                    s.cancel()
+                return None
+            # attempt to acquire seat.lock and book
+            acquired = seat.lock.acquire(blocking=False)
+            if not acquired:
+                # rollback
+                for s in success:
+                    s.cancel()
+                # release any acquired locks
+                for l in locked:
+                    l.release()
+                return None
+            locked.append(seat.lock)
+            if seat.booked:
+                for s in success:
+                    s.cancel()
+                for l in locked:
+                    l.release()
+                return None
+            # mark booked
+            seat.booked = True
+            success.append(seat)
+        # release locks
+        for l in locked:
+            l.release()
+        with self._lock:
+            bid = f"B{self._id_counter}"
+            self._id_counter += 1
+            total = sum(s.price for s in success)
+            self.bookings[bid] = {"user": user, "show": show.show_id, "seats": [s.id for s in success], "amount": total}
+            return bid
+
+    def cancel_booking(self, show: Show, booking_id: str) -> bool:
+        info = self.bookings.get(booking_id)
+        if not info:
+            return False
+        for sid in info["seats"]:
+            show.cancel_seat(sid)
+        info["status"] = "cancelled"
+        info["refunded"] = True
+        return True
+</pre>
+        </div>
+
+        <h3>Unit tests (pytest examples)</h3>
+        <div class="code-block">
+<pre># tests/test_booking.py
+import pytest
+from movie_booking import Seat, Show, BookingManager
+
+@pytest.fixture
+def sample_show():
+    seats = [Seat('A', i, 100.0) for i in range(1, 6)]
+    return Show('S1', seats)
+
+def test_seat_availability_after_booking(sample_show):
+    bm = BookingManager()
+    assert sample_show.is_seat_available('A1')
+    bid = bm.create_booking(sample_show, ['A1'], 'user1')
+    assert bid is not None
+    assert not sample_show.is_seat_available('A1')
+
+def test_double_booking_not_allowed(sample_show):
+    bm = BookingManager()
+    bid1 = bm.create_booking(sample_show, ['A2'], 'u1')
+    assert bid1 is not None
+    # second booking for same seat should fail
+    bid2 = bm.create_booking(sample_show, ['A2'], 'u2')
+    assert bid2 is None
+
+def test_cancellation_restores_seat_and_refund(sample_show):
+    bm = BookingManager()
+    bid = bm.create_booking(sample_show, ['A3'], 'u1')
+    assert bid is not None
+    assert not sample_show.is_seat_available('A3')
+    ok = bm.cancel_booking(sample_show, bid)
+    assert ok
+    assert sample_show.is_seat_available('A3')
+</pre>
+        </div>
+
+        <h3>Notes &amp; extensions</h3>
+        <ul>
+          <li>Payment processing is simulated — integrate a payment gateway for real refunds.</li>
+          <li>To support holds (temporary reservations) implement expiry timers that reset seats to AVAILABLE after N minutes.</li>
+          <li>For production, move seat state into a transactional DB row and use DB-level optimistic/pessimistic locking.</li>
+        </ul>
+
+      </div>
+
+      <aside class="card" style="height:max-content" id="sidebar">
+        <h4>Student Deliverables</h4>
+        <ol class="small">
+          <li>Jupyter Notebook (.ipynb) with classes and tests executed.</li>
+          <li>requirements.txt (pytest).</li>
+          <li>README.md with instructions to run tests: <code>pytest -q</code>.</li>
+          <li>Optional: GitHub repo link and CI (GitHub Actions) to run tests on push.</li>
+        </ol>
+
+        <h4 style="margin-top:12px">How to run (local)</h4>
+        <pre>python -m pytest tests/test_booking.py -q</pre>
+
+        <h4 style="margin-top:12px">Tips</h4>
+        <ul class="small">
+          <li>Keep each test focused (one assert intention per test).</li>
+          <li>Use fixtures to create sample shows and seats.</li>
+          <li>Test edge cases: invalid seat id, empty seat lists, concurrent booking attempts.</li>
+        </ul>
+      </aside>
+    </main>
+
+    <footer>
+      © SR University — School of CS&amp;AI — Assignment (Friday): Movie Ticket Booking System
+    </footer>
+  </div>
+</body>
+</html>
